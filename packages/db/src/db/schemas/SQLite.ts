@@ -25,6 +25,8 @@ export const apiKey = p.sqliteTable("api_key", {
     lastUsedAt: p.integer("last_used_at", { mode: "timestamp" }),
     // Optional expiration timestamp
     expiresAt: p.integer("expires_at", { mode: "timestamp" }),
+    // Allowed IP addresses whitelist (JSON array of IP addresses or CIDR ranges)
+    allowedIps: p.text("allowed_ips", { mode: "json" }).$type<string[]>(),
 });
 
 export const requestLog = p.sqliteTable("request_log", {
@@ -91,6 +93,11 @@ export const jobs = p.sqliteTable("jobs", {
     failed: p.integer("failed").notNull().default(0),
     // Number of credits consumed
     creditsUsed: p.integer("credits_used").notNull().default(0),
+    // Network traffic usage (application layer bytes)
+    trafficBytes: p.integer("traffic_bytes").notNull().default(0),
+    trafficRequestBytes: p.integer("traffic_request_bytes").notNull().default(0),
+    trafficResponseBytes: p.integer("traffic_response_bytes").notNull().default(0),
+    trafficRequestCount: p.integer("traffic_request_count").notNull().default(0),
     // Origin, playground or api
     origin: p.text("origin").notNull(),
     // status of job

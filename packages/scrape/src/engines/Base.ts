@@ -17,9 +17,11 @@ import { insertJobResult, failedJob, completedJob } from "@anycrawl/db";
 import { JOB_RESULT_STATUS } from "../../../db/dist/map.js";
 import { ProgressManager } from "../managers/Progress.js";
 import { JOB_TYPE_CRAWL, JOB_TYPE_SCRAPE } from "@anycrawl/libs";
+import type { RequestTrafficMetric } from "@anycrawl/libs";
 import { CrawlLimitReachedError } from "../errors/index.js";
 import type { CrawlingContext, EngineOptions } from "../types/engine.js";
 import { minimatch } from "minimatch";
+import { BandwidthManager } from "../managers/Bandwidth.js";
 
 // Template system imports - directly use @anycrawl/template-client
 
@@ -254,6 +256,7 @@ export abstract class BaseEngine {
                     }
                 );
                 await failedJob(jobId, error.message, false, { total: 1, completed: 0, failed: 1 });
+                await BandwidthManager.getInstance().flushJob(jobId);
             } catch { }
         }
 
@@ -288,6 +291,7 @@ export abstract class BaseEngine {
                     error
                 );
                 await failedJob(jobId, error.message, false, { total: 1, completed: 0, failed: 1 });
+                await BandwidthManager.getInstance().flushJob(jobId);
             } catch { }
         }
 
@@ -367,10 +371,8 @@ export abstract class BaseEngine {
                     ...(includeRegexps.length > 0 ? { regexps: includeRegexps } : {}),
                     ...(exclude.length > 0 ? { exclude } : {}),
                     // Pass along the userData to new requests
-                    // Ensure original_url is propagated before url transforms of child links
                     userData: {
                         ...context.request.userData,
-                        ...(context.request.userData?.original_url ? { original_url: context.request.userData.original_url } : {}),
                     },
                     // Use 'all' strategy to crawl more broadly, or 'same-domain' for same domain
                     strategy: strategy,
@@ -390,7 +392,15 @@ export abstract class BaseEngine {
                             // Skip enqueuing beyond max depth
                             return null as any;
                         }
-                        request.userData = { ...request.userData, depth: nextDepth } as any;
+                        // Preserve all userData fields and only update depth
+                        // This ensures options (including proxy), crawl_options, etc. are not lost
+                        request.userData = {
+                            ...request.userData,
+                            depth: nextDepth,
+                            // Set original_url to the new request's own URL for proxy rule matching
+                            // Each link should use its own URL to match proxy rules, not inherit parent's
+                            original_url: request.url
+                        } as any;
 
                         // Use Crawlee's own uniqueKey computation to ensure consistency
                         const baseUnique = request.uniqueKey ?? Request.computeUniqueKey({
@@ -559,8 +569,157 @@ export abstract class BaseEngine {
         const requestHandler = async (context: CrawlingContext) => {
             // Note: Progress checking is now handled by limitFilterHook in preNavigationHooks
             // This eliminates duplicate logic and ensures consistent behavior
+
+            // Log proxy and session information if available
+            try {
+                const proxyInfo = (context as any).proxyInfo;
+                const sessionId = (context as any).session?.id || (context.request as any).sessionId || 'unknown';
+                if (proxyInfo?.url) {
+                    const jobId = context.request.userData?.jobId || 'unknown';
+                    const queueName = context.request.userData?.queueName || 'unknown';
+                    log.info(`[PROXY] [${queueName}] [${jobId}] Request URL: ${context.request.url} → Using proxy: ${proxyInfo.url}, session: ${sessionId}`);
+                } else if (sessionId !== 'unknown') {
+                    const jobId = context.request.userData?.jobId || 'unknown';
+                    const queueName = context.request.userData?.queueName || 'unknown';
+                    log.debug(`[SESSION] [${queueName}] [${jobId}] Request URL: ${context.request.url} → Using session: ${sessionId}`);
+                }
+            } catch (error) {
+                // Ignore errors when accessing proxyInfo or session
+            }
+
+            // Check for 403 error early and try refreshing before other processing
+            // This happens before Crawlee's retry mechanism, giving us a chance to recover
+            if (context.response && (context as any).page) {
+                const status = this.extractResponseStatus(context.response as CrawlerResponse);
+                if (status.statusCode === 403) {
+                    const page = (context as any).page;
+                    const jobId = context.request.userData?.jobId || 'unknown';
+                    const queueName = context.request.userData?.queueName || 'unknown';
+
+                    try {
+                        // Wait 10 seconds before retrying to avoid overwhelming the server
+                        log.info(`[${queueName}] [${jobId}] 403 Forbidden detected, waiting 10 seconds before retry: ${context.request.url}`);
+                        await sleep(10000);
+
+                        // Check if page is still open
+                        if (!(page.isClosed && page.isClosed())) {
+                            log.info(`[${queueName}] [${jobId}] Attempting to refresh page after wait: ${context.request.url}`);
+
+                            // Capture response after reload
+                            let refreshResponse: any = null;
+                            const responseHandler = (response: any) => {
+                                try {
+                                    const responseUrl = typeof response.url === 'function' ? response.url() : response.url;
+                                    if (responseUrl === context.request.url || responseUrl === page.url()) {
+                                        refreshResponse = response;
+                                    }
+                                } catch {
+                                    // Ignore errors in response handler
+                                }
+                            };
+
+                            page.on('response', responseHandler);
+
+                            try {
+                                // Reload the page and wait for network idle
+                                await page.reload({ waitUntil: 'networkidle' });
+
+                                // Wait a bit for the page to fully stabilize
+                                await sleep(1000);
+
+                                // Remove the response handler
+                                page.off('response', responseHandler);
+
+                                // Check the status code from the refresh response
+                                if (refreshResponse) {
+                                    let newStatusCode = 403;
+                                    try {
+                                        newStatusCode = typeof refreshResponse.status === 'function'
+                                            ? refreshResponse.status()
+                                            : (refreshResponse.status || 403);
+                                    } catch {
+                                        // Fallback: re-check context.response
+                                        if (context.response) {
+                                            const newStatus = this.extractResponseStatus(context.response as CrawlerResponse);
+                                            newStatusCode = newStatus.statusCode;
+                                        }
+                                    }
+
+                                    if (newStatusCode === 403) {
+                                        log.warning(`[${queueName}] [${jobId}] Still 403 after refresh: ${context.request.url}`);
+                                    } else {
+                                        log.info(`[${queueName}] [${jobId}] Status changed after refresh: ${newStatusCode} for ${context.request.url}`);
+                                        // Update context.response if possible
+                                        if (refreshResponse && (context as any).response) {
+                                            (context as any).response = refreshResponse;
+                                        }
+                                    }
+                                } else {
+                                    // If we couldn't capture response, re-check context.response
+                                    if (context.response) {
+                                        const newStatus = this.extractResponseStatus(context.response as CrawlerResponse);
+                                        if (newStatus.statusCode !== 403) {
+                                            log.info(`[${queueName}] [${jobId}] Status changed after refresh: ${newStatus.statusCode} for ${context.request.url}`);
+                                        }
+                                    }
+                                }
+                            } catch (reloadError) {
+                                page.off('response', responseHandler);
+                                throw reloadError;
+                            }
+                        }
+                    } catch (refreshError) {
+                        log.warning(`[${queueName}] [${jobId}] Failed to refresh page for 403 error: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`);
+                    }
+                }
+            }
+
             // check if http status code is 400 or higher
-            const isHttpError = await checkHttpError(context);
+            // Note: 403 refresh logic is already handled earlier in the handler (before this check)
+            let isHttpError = await checkHttpError(context);
+
+            // Cheerio traffic tracking (browser engines use CDP-based tracking)
+            try {
+                const jobId = context.request.userData?.jobId as string | undefined;
+                const isBrowser = !!(context as any).page;
+                if (jobId && !isBrowser && context.response) {
+                    const headers: Record<string, any> = (context.response as any).headers || {};
+                    const rawContentLength = headers["content-length"] ?? headers["Content-Length"];
+                    let responseBytes = 0;
+                    if (rawContentLength !== undefined) {
+                        const parsed = Number.parseInt(String(rawContentLength), 10);
+                        if (Number.isFinite(parsed) && parsed > 0) responseBytes = parsed;
+                    }
+                    if (responseBytes === 0) {
+                        const body: any = (context as any).body;
+                        if (Buffer.isBuffer(body)) responseBytes = body.length;
+                        else if (typeof body === "string") responseBytes = Buffer.byteLength(body, "utf8");
+                    }
+
+                    let requestBytes = 0;
+                    try {
+                        const reqHeaders = (context.request as any).headers ?? {};
+                        requestBytes = Buffer.byteLength(JSON.stringify(reqHeaders), "utf8");
+                    } catch { }
+
+                    const metric: RequestTrafficMetric = {
+                        id: `cheerio:${String((context.request as any).id ?? context.request.uniqueKey ?? Date.now())}`,
+                        jobId,
+                        engine: "cheerio",
+                        url: context.request.url,
+                        method: String((context.request as any).method ?? "GET"),
+                        requestBytes,
+                        responseBytes,
+                        totalBytes: requestBytes + responseBytes,
+                        startTime: Date.now(),
+                        endTime: Date.now(),
+                        failed: isHttpError,
+                    };
+
+                    BandwidthManager.getInstance().recordRequest(metric);
+                }
+            } catch { }
+
             let data = null;
 
             // Create a Promise wrapper to control page lifecycle for template execution
@@ -896,6 +1055,7 @@ export abstract class BaseEngine {
                     try {
                         await this.jobManager.markCompleted(jobId, queueName, data);
                         await completedJob(jobId, true, { total: 1, completed: 1, failed: 0 });
+                        await BandwidthManager.getInstance().flushJob(jobId);
                     } catch { }
                 }
                 // For crawl jobs: mark page done and try finalize

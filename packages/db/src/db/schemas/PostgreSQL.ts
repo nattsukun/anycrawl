@@ -25,6 +25,8 @@ export const apiKey = p.pgTable("api_key", {
     lastUsedAt: p.timestamp("last_used_at"),
     // Optional expiration timestamp
     expiresAt: p.timestamp("expires_at"),
+    // Allowed IP addresses whitelist (JSON array of IP addresses or CIDR ranges)
+    allowedIps: p.jsonb("allowed_ips").$type<string[]>(),
 });
 
 export const requestLog = p.pgTable("request_log", {
@@ -91,6 +93,11 @@ export const jobs = p.pgTable("jobs", {
     failed: p.integer("failed").notNull().default(0),
     // Number of credits consumed
     creditsUsed: p.integer("credits_used").notNull().default(0),
+    // Network traffic usage (application layer bytes)
+    trafficBytes: p.bigint("traffic_bytes", { mode: "number" }).notNull().default(0),
+    trafficRequestBytes: p.bigint("traffic_request_bytes", { mode: "number" }).notNull().default(0),
+    trafficResponseBytes: p.bigint("traffic_response_bytes", { mode: "number" }).notNull().default(0),
+    trafficRequestCount: p.integer("traffic_request_count").notNull().default(0),
     // Origin, playground or api
     origin: p.text("origin").notNull(),
     // status of job
