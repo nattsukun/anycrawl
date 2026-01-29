@@ -1,0 +1,119 @@
+{
+  "name": "HotelPlus Blog to CSV Scraper",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start-node",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.hotelplus.asia/blog",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "http-request-blog-list",
+      "name": "HTTP Request - Get Blog List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract all article URLs from the blog list page\nconst html = $input.item.json.data || $input.item.json;\nconst articleUrls = [];\n\n// Parse HTML to find article links\nconst articleRegex = /<a[^>]+href=\"([^\"]+)\"[^>]*>/gi;\nlet match;\n\nwhile ((match = articleRegex.exec(html)) !== null) {\n  const url = match[1];\n  // Filter only blog article URLs\n  if (url.includes('/blog/') && !url.includes('#') && url !== '/blog') {\n    const fullUrl = url.startsWith('http') ? url : `https://www.hotelplus.asia${url}`;\n    if (!articleUrls.includes(fullUrl)) {\n      articleUrls.push(fullUrl);\n    }\n  }\n}\n\n// Return array of URLs\nreturn articleUrls.map((url, index) => ({\n  json: {\n    url: url,\n    id: index + 1\n  }\n}));"
+      },
+      "id": "code-extract-urls",
+      "name": "Code - Extract Article URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "http-request-article",
+      "name": "HTTP Request - Get Article",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse article content and extract metadata\nconst html = $input.item.json.data || $input.item.json;\nconst url = $input.item.json.url;\nconst id = $input.item.json.id;\n\n// Helper function to extract text between tags\nfunction extractContent(html, pattern) {\n  const match = html.match(pattern);\n  return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';\n}\n\n// Extract metadata\nconst title = extractContent(html, /<title>([^<]+)<\\/title>/i) || \n              extractContent(html, /<h1[^>]*>([^<]+)<\\/h1>/i) || 'Untitled';\n\nconst description = extractContent(html, /<meta[^>]+name=[\"']description[\"'][^>]+content=[\"']([^\"']+)[\"']/i) ||\n                   extractContent(html, /<meta[^>]+property=[\"']og:description[\"'][^>]+content=[\"']([^\"']+)[\"']/i) ||\n                   '';\n\nconst keywords = extractContent(html, /<meta[^>]+name=[\"']keywords[\"'][^>]+content=[\"']([^\"']+)[\"']/i) || '';\n\n// Extract date\nconst dateMatch = html.match(/<time[^>]+datetime=[\"']([^\"']+)[\"']/i) ||\n                 html.match(/\\d{4}-\\d{2}-\\d{2}/)\nconst date = dateMatch ? dateMatch[1] : new Date().toISOString().split('T')[0];\n\n// Detect language (simple check for Thai characters)\nconst language = /[\\u0E00-\\u0E7F]/.test(title + description) ? 'TH' : 'EN';\n\n// Extract location from content (look for common Thai cities)\nconst locations = ['เชียงใหม่', 'ภูเก็ต', 'กรุงเทพ', 'พัทยา', 'เกาะสมุย'];\nlet location = '';\nfor (const loc of locations) {\n  if (html.includes(loc)) {\n    location = loc;\n    break;\n  }\n}\n\n// Determine topic from URL or title\nlet topic = location || 'ทั่วไป';\n\n// Determine category\nlet category = 'โรงแรม';\nif (title.includes('รีวิว') || title.includes('review')) {\n  category = 'รีวิว';\n} else if (title.includes('SEO') || title.includes('GEO')) {\n  category = 'กลยุทธ์';\n}\n\n// Determine type\nlet type = 'keyword';\nif (category === 'รีวิว') {\n  type = 'review';\n} else if (title.includes('FAQ') || title.includes('คำถาม')) {\n  type = 'faq';\n} else if (title.includes('คู่มือ') || title.includes('guide')) {\n  type = 'guide';\n}\n\nreturn {\n  json: {\n    id: id,\n    type: type,\n    topic: topic,\n    keyword: keywords || title.substring(0, 50),\n    description: description.substring(0, 200),\n    reference_id: `blog${id}`,\n    url: url,\n    category: category,\n    location: location,\n    date: date,\n    language: language,\n    search_volume: '',\n    competition: '',\n    ranking: '',\n    notes: 'Scraped from hotelplus.asia blog'\n  }\n};"
+      },
+      "id": "code-parse-article",
+      "name": "Code - Parse Article Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "aggregateItems",
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate",
+      "name": "Aggregate",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "formatData",
+        "format": "csv",
+        "options": {
+          "fileName": "hotelplus_metadata.csv",
+          "headerRow": true
+        }
+      },
+      "id": "convert-to-csv",
+      "name": "Convert to CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "filePath": "C:\\Users\\NMuan\\Downloads\\hotelplus\\hotelplus_metadata.csv",
+        "options": {}
+      },
+      "id": "write-file",
+      "name": "Write Binary File",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [1650, 300]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [[{ "node": "HTTP Request - Get Blog List", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request - Get Blog List": {
+      "main": [[{ "node": "Code - Extract Article URLs", "type": "main", "index": 0 }]]
+    },
+    "Code - Extract Article URLs": {
+      "main": [[{ "node": "HTTP Request - Get Article", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request - Get Article": {
+      "main": [[{ "node": "Code - Parse Article Data", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse Article Data": {
+      "main": [[{ "node": "Aggregate", "type": "main", "index": 0 }]]
+    },
+    "Aggregate": {
+      "main": [[{ "node": "Convert to CSV", "type": "main", "index": 0 }]]
+    },
+    "Convert to CSV": {
+      "main": [[{ "node": "Write Binary File", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {}
+}

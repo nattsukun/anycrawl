@@ -1,0 +1,299 @@
+{
+  "name": "HotelPlus Blog Scraper (Fixed)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start-node",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate all page URLs to scrape\nconst maxPages = 10;\nconst pages = [];\n\nfor (let i = 1; i <= maxPages; i++) {\n  pages.push({\n    json: {\n      pageUrl: i === 1 ? 'https://www.hotelplus.asia/blog' : `https://www.hotelplus.asia/blog?page=${i}`,\n      pageNumber: i\n    }\n  });\n}\n\nreturn pages;"
+      },
+      "id": "generate-page-urls",
+      "name": "Generate Page URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.pageUrl }}",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "http-blog-list",
+      "name": "Get Blog List Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "articleLinks",
+              "cssSelector": "a[href*='/blog/']",
+              "returnValue": "attribute",
+              "attribute": "href",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "html-extract-links",
+      "name": "HTML - Extract Links",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process and filter article URLs\nconst links = $input.item.json.articleLinks || [];\nconst uniqueUrls = new Set();\n\nlinks.forEach(link => {\n  if (link && link.includes('/blog/') && !link.includes('#') && !link.endsWith('/blog') && !link.endsWith('/blog/')) {\n    const fullUrl = link.startsWith('http') ? link : `https://www.hotelplus.asia${link}`;\n    uniqueUrls.add(fullUrl);\n  }\n});\n\nconst urls = Array.from(uniqueUrls);\n\nreturn urls.map((url, index) => ({\n  json: {\n    url: url,\n    id: index + 1\n  }\n}));"
+      },
+      "id": "code-process-urls",
+      "name": "Process URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "removeDuplicates",
+        "compare": "selectedFields",
+        "fieldsToCompare": {
+          "fields": [
+            {
+              "fieldName": "url"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "remove-duplicates",
+      "name": "Remove Duplicate URLs",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "batching": {
+          "batch": {
+            "batchSize": 1
+          }
+        }
+      },
+      "id": "split-in-batches",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-get-article",
+      "name": "Get Article Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1650, 300]
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "title",
+              "cssSelector": "h1, .entry-title, .post-title, title",
+              "returnValue": "text"
+            },
+            {
+              "key": "content",
+              "cssSelector": "article, .post-content, .entry-content, main",
+              "returnValue": "text"
+            },
+            {
+              "key": "metaDescription",
+              "cssSelector": "meta[name='description']",
+              "returnValue": "attribute",
+              "attribute": "content"
+            },
+            {
+              "key": "metaKeywords",
+              "cssSelector": "meta[name='keywords']",
+              "returnValue": "attribute",
+              "attribute": "content"
+            },
+            {
+              "key": "publishDate",
+              "cssSelector": "time[datetime], .published-date, .post-date",
+              "returnValue": "attribute",
+              "attribute": "datetime"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "html-extract-content",
+      "name": "Extract Article Metadata",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1,
+      "position": [1850, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map scraped data to metadata format\nconst item = $input.item.json;\nconst batchItem = $node[\"Split In Batches\"].json;\nconst url = batchItem.url;\nconst id = batchItem.id;\n\nconst title = (item.title || 'Untitled').trim();\nconst content = (item.content || '').trim();\nconst description = (item.metaDescription || content.substring(0, 200)).trim();\nconst keywords = (item.metaKeywords || title.substring(0, 50)).trim();\nconst publishDate = item.publishDate || new Date().toISOString().split('T')[0];\n\nconst thaiRegex = /[\\u0E00-\\u0E7F]/;\nconst language = thaiRegex.test(title + description) ? 'TH' : 'EN';\n\nconst locationMap = {\n  'เชียงใหม่': 'เชียงใหม่', 'chiangmai': 'เชียงใหม่', 'chiang mai': 'เชียงใหม่',\n  'ภูเก็ต': 'ภูเก็ต', 'phuket': 'ภูเก็ต',\n  'กรุงเทพ': 'กรุงเทพ', 'bangkok': 'กรุงเทพ',\n  'พัทยา': 'พัทยา', 'pattaya': 'พัทยา',\n  'เกาะสมุย': 'เกาะสมุย', 'samui': 'เกาะสมุย'\n};\n\nlet location = '';\nconst searchText = (title + content + url).toLowerCase();\nfor (const [key, value] of Object.entries(locationMap)) {\n  if (searchText.includes(key.toLowerCase())) {\n    location = value;\n    break;\n  }\n}\n\nlet type = 'keyword';\nlet category = 'โรงแรม';\n\nif (title.includes('รีวิว') || title.toLowerCase().includes('review')) {\n  type = 'review';\n  category = 'รีวิว';\n} else if (title.includes('FAQ') || title.includes('คำถาม')) {\n  type = 'faq';\n  category = 'ความรู้ทั่วไป';\n} else if (title.includes('คู่มือ') || title.toLowerCase().includes('guide')) {\n  type = 'guide';\n  category = 'กลยุทธ์';\n} else if (title.includes('SEO') || title.includes('GEO')) {\n  category = 'กลยุทธ์';\n}\n\nconst topic = location || (title.includes('SEO') ? 'กลยุทธ์' : 'ทั่วไป');\n\nreturn {\n  json: {\n    id: id,\n    type: type,\n    topic: topic,\n    keyword: keywords,\n    description: description,\n    reference_id: `blog${id}_${new Date().getFullYear()}`,\n    url: url,\n    category: category,\n    location: location,\n    date: publishDate,\n    language: language,\n    search_volume: '',\n    competition: '',\n    ranking: '',\n    notes: `Scraped from hotelplus.asia on ${new Date().toISOString().split('T')[0]}`\n  }\n};"
+      },
+      "id": "code-map-metadata",
+      "name": "Map to Metadata Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "value": "26N3jwPH0CDlpmv6",
+          "mode": "list",
+          "cachedResultName": "SEO_GEO_Knowledge",
+          "cachedResultUrl": "/projects/6cOnSoILMYNKOgOM/datatables/26N3jwPH0CDlpmv6"
+        },
+        "columns": {
+          "mappings": [
+            {"column": "id", "value": "={{ $json.id }}"},
+            {"column": "type", "value": "={{ $json.type }}"},
+            {"column": "topic", "value": "={{ $json.topic }}"},
+            {"column": "keyword", "value": "={{ $json.keyword }}"},
+            {"column": "description", "value": "={{ $json.description }}"},
+            {"column": "reference_id", "value": "={{ $json.reference_id }}"},
+            {"column": "url", "value": "={{ $json.url }}"},
+            {"column": "category", "value": "={{ $json.category }}"},
+            {"column": "location", "value": "={{ $json.location }}"},
+            {"column": "date", "value": "={{ $json.date }}"},
+            {"column": "language", "value": "={{ $json.language }}"},
+            {"column": "search_volume", "value": "={{ $json.search_volume }}"},
+            {"column": "competition", "value": "={{ $json.competition }}"},
+            {"column": "ranking", "value": "={{ $json.ranking }}"},
+            {"column": "notes", "value": "={{ $json.notes }}"}
+          ]
+        },
+        "options": {}
+      },
+      "id": "insert-to-datatable",
+      "name": "Insert to DataTable",
+      "type": "n8n-nodes-base.dataTableTool",
+      "typeVersion": 1,
+      "position": [2250, 300]
+    },
+    {
+      "parameters": {},
+      "id": "loop-back",
+      "name": "Loop Back",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2450, 300]
+    },
+    {
+      "parameters": {
+        "operation": "aggregateItems",
+        "aggregate": "aggregateAllItemData",
+        "options": {}
+      },
+      "id": "aggregate-all",
+      "name": "Aggregate All Articles",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [1450, 500]
+    },
+    {
+      "parameters": {
+        "operation": "formatData",
+        "format": "csv",
+        "options": {
+          "fileName": "hotelplus_metadata.csv",
+          "headerRow": true,
+          "delimiter": ","
+        }
+      },
+      "id": "convert-csv",
+      "name": "Convert to CSV",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1,
+      "position": [1650, 500]
+    },
+    {
+      "parameters": {
+        "filePath": "C:\\Users\\NMuan\\Downloads\\hotelplus\\hotelplus_metadata_{{ $now.format('yyyyMMdd_HHmmss') }}.csv",
+        "options": {}
+      },
+      "id": "write-csv",
+      "name": "Write CSV File",
+      "type": "n8n-nodes-base.writeBinaryFile",
+      "typeVersion": 1,
+      "position": [1850, 500]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [[{"node": "Generate Page URLs", "type": "main", "index": 0}]]
+    },
+    "Generate Page URLs": {
+      "main": [[{"node": "Get Blog List Page", "type": "main", "index": 0}]]
+    },
+    "Get Blog List Page": {
+      "main": [[{"node": "HTML - Extract Links", "type": "main", "index": 0}]]
+    },
+    "HTML - Extract Links": {
+      "main": [[{"node": "Process URLs", "type": "main", "index": 0}]]
+    },
+    "Process URLs": {
+      "main": [[{"node": "Remove Duplicate URLs", "type": "main", "index": 0}]]
+    },
+    "Remove Duplicate URLs": {
+      "main": [[{"node": "Split In Batches", "type": "main", "index": 0}]]
+    },
+    "Split In Batches": {
+      "main": [
+        [{"node": "Aggregate All Articles", "type": "main", "index": 0}],
+        [{"node": "Get Article Content", "type": "main", "index": 0}]
+      ]
+    },
+    "Get Article Content": {
+      "main": [[{"node": "Extract Article Metadata", "type": "main", "index": 0}]]
+    },
+    "Extract Article Metadata": {
+      "main": [[{"node": "Map to Metadata Format", "type": "main", "index": 0}]]
+    },
+    "Map to Metadata Format": {
+      "main": [[{"node": "Insert to DataTable", "type": "main", "index": 0}]]
+    },
+    "Insert to DataTable": {
+      "main": [[{"node": "Loop Back", "type": "main", "index": 0}]]
+    },
+    "Loop Back": {
+      "main": [[{"node": "Split In Batches", "type": "main", "index": 0}]]
+    },
+    "Aggregate All Articles": {
+      "main": [[{"node": "Convert to CSV", "type": "main", "index": 0}]]
+    },
+    "Convert to CSV": {
+      "main": [[{"node": "Write CSV File", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {}
+}
